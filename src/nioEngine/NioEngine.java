@@ -12,6 +12,7 @@ import java.nio.ByteOrder;
 import java.nio.channels.*;
 import java.nio.channels.spi.SelectorProvider;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Set;
 import chat.ChatClient;
@@ -29,13 +30,13 @@ public class NioEngine implements I_NioEngine {//, Runnable {
     public int numeroMessage; // pourra etre supprime et remplace par le contenu du message
     public ByteBuffer outBuffer;
     public ByteBuffer inBuffer;
-    //public static final int length = 500; // a supprimer et remplacer par une variable
+    public HashMap<SocketChannel, ByteBuffer> inBuffers;
     public int octetsTransmis;
     public String message;
     public int sizeOfMessageToRead;
     public int numRead;
-    public ArrayList<VarChannel> registeredClients;
-    public ArrayList<VarChannel> currentGroup;//Groupe de clients connus par chaque client du groupe "actuel"
+    public ArrayList<ClientChannel> registeredClients;
+    public ArrayList<ClientChannel> currentGroup;//Groupe de clients connus par chaque client du groupe "actuel"
     public int typeOfMessage = 0;
     public static final int MESSAGE_TYPE_REGISTER = 1;
     public static final int MESSAGE_TYPE_LEAVE = 2;
@@ -54,20 +55,22 @@ public class NioEngine implements I_NioEngine {//, Runnable {
     };
     public SendType sendType;
     public boolean running;
-    public Side side;
+    public boolean isServer;
     public EtatReception etat;
 
     public NioEngine() throws IOException {
         numeroMessage = 0;
         outBuffer = ByteBuffer.allocate(4); // mettre à 4 au debut pour envoyer la taille du message
         inBuffer = ByteBuffer.allocate(4); // 
+        inBuffers = new HashMap<SocketChannel,ByteBuffer>();
         sizeOfMessageToRead = 0;
         numRead = 0;
         etat = etat.RECEPTION_TAILLE;
-        registeredClients = new ArrayList<VarChannel>();
-        currentGroup = new ArrayList<VarChannel>();
+        registeredClients = new ArrayList<ClientChannel>();
+        currentGroup = new ArrayList<ClientChannel>();
         isLastToSend = false;
         running = true;
+        
 
     }
 
@@ -80,7 +83,7 @@ public class NioEngine implements I_NioEngine {//, Runnable {
      */
     @Override
     public void InitializeAsServer(InetAddress hostAddress, int port, I_RecvMsgHandler handler) throws IOException {
-        side = Side.SERVER;
+        isServer = true;
         selector = SelectorProvider.provider().openSelector();
 
         // create a new non-blocking server socket channel
@@ -104,7 +107,7 @@ public class NioEngine implements I_NioEngine {//, Runnable {
      */
     @Override
     public void InitializeAsClient(InetAddress hostAddress, int port, I_RecvMsgHandler handler) throws IOException {
-        side = Side.CLIENT;
+        isServer = false;
         //etat = etat.ENVOI_TAILLE;
         channelToCommunicateWithServer = SocketChannel.open();
         // set channel to non blocking
@@ -204,21 +207,21 @@ public class NioEngine implements I_NioEngine {//, Runnable {
         sendType = SendType.BROADCAST;
         // SEND methode for server to broadcast receved messages
 
-        for (VarChannel varChannel : registeredClients) {
-            SocketChannel sock = varChannel.socketChannel;
+        for (ClientChannel clientChannel : registeredClients) {
+            SocketChannel sock = clientChannel.socketChannel;
             if (sock != socketChannel) {
                 numberOfUncompleteTransmission++;
-                varChannel.outBuffer = ByteBuffer.allocate(data.length + 4 + 4);
-                //varChannel.outBuffer = ByteBuffer.allocate(data.length + 4 + 4); // il faudra ensuite remplacé par + 8
+                clientChannel.outBuffer = ByteBuffer.allocate(data.length + 4 + 4);
+                //clientChannel.outBuffer = ByteBuffer.allocate(data.length + 4 + 4); // il faudra ensuite remplacé par + 8
                 System.out.println("La taille du message + type + contenu = " + (data.length + 4 + 4));
-                varChannel.outBuffer.clear();
-                varChannel.outBuffer.putInt(data.length); // met la taille du message dans le outBuffer
+                clientChannel.outBuffer.clear();
+                clientChannel.outBuffer.putInt(data.length); // met la taille du message dans le outBuffer
                 System.out.println("Le type du message qu'on met dans outbuffer : " + typeOfMessage);
-                varChannel.outBuffer.putInt(typeOfMessage);// met le type du message a lire dans le outBuffer
-                varChannel.outBuffer.put(data); // met le contenu du message dans le outBuffer
-                varChannel.outBuffer.rewind();
-                varChannel.outBuffer.limit(data.length + 4 + 4);
-                System.out.println("Si string dans le buffer, vaut en gros : " + new String(varChannel.outBuffer.array()));
+                clientChannel.outBuffer.putInt(typeOfMessage);// met le type du message a lire dans le outBuffer
+                clientChannel.outBuffer.put(data); // met le contenu du message dans le outBuffer
+                clientChannel.outBuffer.rewind();
+                clientChannel.outBuffer.limit(data.length + 4 + 4);
+                System.out.println("Si string dans le buffer, vaut en gros : " + new String(clientChannel.outBuffer.array()));
             }
         }
     }
@@ -238,23 +241,18 @@ public class NioEngine implements I_NioEngine {//, Runnable {
         }
     }
 
-    public void generateMessage() {
-        //attente(5000); // temps de generation d'un message
-        numeroMessage++;
-        message = new String("-- Je suis le message " + numeroMessage + " :) --");
-        //outBuffer = ByteBuffer.wrap(new String("message salut : " + numeroMessage).getBytes()); WRAP NE PAS UTILISER REND STATIC
-        // GROS PROBLEME AVEC WRAP, IL FAUT UTILISER PUT ET CLEAR et réallouer!!!!!!
-        //System.out.println("Message : "+new String(outBuffer.array())+" genere.");
-    }
 
     private void handleDataIn(SelectionKey key) throws IOException {
         System.out.println("DEBUT handledataIN");
         SocketChannel socketChannel = (SocketChannel) key.channel();//channel pour lequel la key a été créée
         int currentNumRead;
-
+        if(!inBuffers.containsKey(socketChannel))
+        	inBuffers.put(socketChannel, ByteBuffer.allocate(4));
+        
         if (etat == etat.RECEPTION_TAILLE) {
             try {
-                currentNumRead = socketChannel.read(inBuffer); // devrait recevoir reellement
+            	currentNumRead = socketChannel.read(inBuffers.get(socketChannel));
+                //currentNumRead = socketChannel.read(inBuffer); // devrait recevoir reellement
             } catch (IOException e) {
                 System.out.println("HEYYYYYYYYYYYYYYYYYYYY close");
                 key.cancel();
@@ -274,16 +272,20 @@ public class NioEngine implements I_NioEngine {//, Runnable {
 
             if (numRead == 4) {
                 System.out.println("#### TAILLE MESSAGE LU ENTIEREMENT ### OK");
-                sizeOfMessageToRead = java.nio.ByteBuffer.wrap(inBuffer.array()).getInt(); // stock la taille du message
+                sizeOfMessageToRead = java.nio.ByteBuffer.wrap(inBuffers.get(socketChannel).array()).getInt();
+                //sizeOfMessageToRead = java.nio.ByteBuffer.wrap(inBuffer.array()).getInt(); // stock la taille du message
                 System.out.println("taille du message a lire : " + sizeOfMessageToRead);
-                inBuffer = ByteBuffer.allocate(4);
-                inBuffer.clear();
+                inBuffers.put(socketChannel, ByteBuffer.allocate(4));
+                inBuffers.get(socketChannel).clear();
+                //inBuffer = ByteBuffer.allocate(4);
+                //inBuffer.clear();
                 etat = etat.RECEPTION_TYPE;
                 numRead = 0;
             }
         } else if (etat == etat.RECEPTION_TYPE) {
             try {
-                currentNumRead = socketChannel.read(inBuffer); // devrait recevoir reellement
+            	currentNumRead = socketChannel.read(inBuffers.get(socketChannel));
+                //currentNumRead = socketChannel.read(inBuffer); // devrait recevoir reellement
             } catch (IOException e) {
                 key.cancel();
                 socketChannel.close();
@@ -304,10 +306,14 @@ public class NioEngine implements I_NioEngine {//, Runnable {
 
             if (numRead == 4) {
                 System.out.println("#### Type du MESSAGE LU ENTIEREMENT ### OK");
-                typeOfMessage = java.nio.ByteBuffer.wrap(inBuffer.array()).getInt(); // stock la taille du message
+                typeOfMessage = java.nio.ByteBuffer.wrap(inBuffers.get(socketChannel).array()).getInt();
+                System.out.println("<<<<<<<Type du message "+ typeOfMessage+">>>>>>>>>");
+                //typeOfMessage = java.nio.ByteBuffer.wrap(inBuffer.array()).getInt(); // stock la taille du message
                 System.out.println("type du message a lire : " + typeOfMessage);
-                inBuffer = ByteBuffer.allocate(sizeOfMessageToRead); // agrandi le tableau
-                inBuffer.clear();
+                inBuffers.put(socketChannel, ByteBuffer.allocate(sizeOfMessageToRead));
+                inBuffers.get(socketChannel).clear();
+                //inBuffer = ByteBuffer.allocate(sizeOfMessageToRead); // agrandi le tableau
+                //inBuffer.clear();
                 etat = etat.RECEPTION_MESSAGE;
                 numRead = 0;
             }
@@ -315,7 +321,8 @@ public class NioEngine implements I_NioEngine {//, Runnable {
         } else { // etat == etat.RECEPTION_MESSAGE
 
             try {
-                currentNumRead = socketChannel.read(inBuffer); // devrait envoyer reellement
+            	currentNumRead = socketChannel.read(inBuffers.get(socketChannel));
+                //currentNumRead = socketChannel.read(inBuffer); // devrait envoyer reellement
             } catch (IOException e) {
                 key.cancel();
                 socketChannel.close();
@@ -331,18 +338,21 @@ public class NioEngine implements I_NioEngine {//, Runnable {
             numRead += currentNumRead;
             System.out.println("currentNumReadReceptionMessage = " + currentNumRead);
             if (numRead == sizeOfMessageToRead) {
-                System.out.println("#### TOUT A ETE LU (le messageeee) ### OK : " + new String(inBuffer.array()));
+                System.out.println("#### TOUT A ETE LU (le messageeee) ### OK : " + new String(inBuffers.get(socketChannel).array()));
 
                 // Process the received data, be aware that it may be incomplete
-                if (side == Side.SERVER) {
-                    processDataServer(inBuffer.array(), key);
+                if (isServer) {
+                	processDataServer(inBuffers.get(socketChannel).array(), key);
+                    //processDataServer(inBuffer.array(), key);
                 } else {
-                    processDataClient(inBuffer.array());
+                	processDataClient(inBuffers.get(socketChannel).array());
+                    //processDataClient(inBuffer.array());
                 }
                 numRead = 0;
                 //etat = etat.ENVOI_TAILLE;
                 etat = etat.RECEPTION_TAILLE;
-                inBuffer = ByteBuffer.allocate(4); // remet la taille du tableau à 4 (int)
+                inBuffers.put(socketChannel, ByteBuffer.allocate(4));
+                //inBuffer = ByteBuffer.allocate(4); // remet la taille du tableau à 4 (int)
                 //key.interestOps(SelectionKey.OP_WRITE);
             }
         }
@@ -356,14 +366,14 @@ public class NioEngine implements I_NioEngine {//, Runnable {
             System.out.println("Envoi en broadcast");
             // if (etat == etat.ENVOI_TAILLE) { boolean
             //everithingSent = true; 
-            for (VarChannel varChannel : registeredClients) {
-                if (varChannel.socketChannel != channelToCommunicateWithClient) {
-                    varChannel.socketChannel.write(varChannel.outBuffer);
-                    System.out.println("outBuffer position : " + varChannel.outBuffer.position());
-                    System.out.println("outBuffer limit : " + varChannel.outBuffer.limit());
+            for (ClientChannel clientChannel : registeredClients) {
+                if (clientChannel.socketChannel != channelToCommunicateWithClient) {
+                    clientChannel.socketChannel.write(clientChannel.outBuffer);
+                    System.out.println("outBuffer position : " + clientChannel.outBuffer.position());
+                    System.out.println("outBuffer limit : " + clientChannel.outBuffer.limit());
                     System.out.println("numberOfUncompleteTransmission : " + numberOfUncompleteTransmission);
                     // Be aware that the write may be incomplete
-                    if (varChannel.outBuffer.position() == varChannel.outBuffer.limit()) {
+                    if (clientChannel.outBuffer.position() == clientChannel.outBuffer.limit()) {
                         numberOfUncompleteTransmission--;
                         if (numberOfUncompleteTransmission == 0) {
                             System.out.println("numberOfUncompleteTransmission = 0");
@@ -397,7 +407,7 @@ public class NioEngine implements I_NioEngine {//, Runnable {
         System.out.println("avant les checks");
         if (alreadyPresent(channelToCommunicateWithClient) == -1) {
             if (typeOfMessage == MESSAGE_TYPE_REGISTER) {
-                registerVarChannel(msg, channelToCommunicateWithClient);
+                registerClientChannel(msg, channelToCommunicateWithClient);
                 if (registeredClients.size() > 1) {
                     send(channelToCommunicateWithClient, array);
                     //channelToCommunicateWithClient.register(selector, SelectionKey.OP_WRITE);
@@ -462,9 +472,9 @@ public class NioEngine implements I_NioEngine {//, Runnable {
         int alreadyPresent = -1;
         int i = 0;;
 
-        for (VarChannel varChannel : registeredClients) {
+        for (ClientChannel clientChannel : registeredClients) {
 
-            if (varChannel.socketChannel == clientSocket) {
+            if (clientChannel.socketChannel == clientSocket) {
                 alreadyPresent = i;
                 break;
             }
@@ -475,15 +485,15 @@ public class NioEngine implements I_NioEngine {//, Runnable {
     }
 
     // must check if it already exists
-    public void registerVarChannel(String msg, SocketChannel clientSocket) {
-        registeredClients.add(new VarChannel(clientSocket, msg));
+    public void registerClientChannel(String msg, SocketChannel clientSocket) {
+        registeredClients.add(new ClientChannel(clientSocket, msg));
     }
 
     public String who() {
         String listeConnectes = new String("");
 
-        for (VarChannel varChannel : registeredClients) {
-            listeConnectes = listeConnectes + " \n- " + varChannel.name;
+        for (ClientChannel clientChannel : registeredClients) {
+            listeConnectes = listeConnectes + " \n- " + clientChannel.name;
         }
 
         return listeConnectes;
